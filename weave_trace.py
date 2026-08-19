@@ -60,18 +60,15 @@ def create_generation_output_dir(
     *,
     llm_model: str,
     rag_enabled: bool,
-    task_name: str,
     framework: str,
 ) -> Path:
-    rag_use = "rag" if rag_enabled else ""
-    timestamp = time.time_ns()
+    rag_part = "rag" if rag_enabled else ""
     output_dir = GENERATED_CODE_DIR / "_".join(
         [
             safe_path_part(llm_model),
-            rag_use,
-            safe_path_part(task_name),
+            rag_part,
             safe_path_part(framework),
-            str(timestamp),
+            str(time.time_ns()),
         ]
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -79,16 +76,18 @@ def create_generation_output_dir(
 
 
 def safe_path_part(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "unknown"
+    return re.sub(r"[^A-Za-z0-9.-]+", "-", value).strip(".-") or "unknown"
 
 
 def save_generated_code(
     *,
     generated_code: str,
     output_dir: str | Path,
+    task_name: str,
     run_index: int,
 ) -> Path:
-    save_code_file_path = Path(output_dir) / f"code_{run_index}.py"
+    filename = f"{safe_path_part(task_name)}_code_{run_index}.py"
+    save_code_file_path = Path(output_dir) / filename
     save_code_file_path.write_text(generated_code, encoding="utf-8")
     return save_code_file_path
 
@@ -111,6 +110,7 @@ def trace_code_generation(
     save_code_file_path = save_generated_code(
         generated_code=generated_code,
         output_dir=output_dir,
+        task_name=task_name,
         run_index=run_index,
     )
 

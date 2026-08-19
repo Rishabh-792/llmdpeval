@@ -132,7 +132,7 @@ def build_ollama_llm(model_name: str):
     return Ollama(
         model=model_name,
         temperature=0.0,
-        request_timeout=300.0,
+        request_timeout=600.0,
         additional_kwargs={"num_predict": MAX_OUTPUT_TOKENS},
     )
 
@@ -359,11 +359,13 @@ class RAGQueryPostprocessor:
         candidate_nodes,
         all_nodes=None,
         threshold: float = 0.035,
+        max_context_documents: int = 3,
     ) -> None:
         self.prompt = prompt
         self.candidate_nodes = candidate_nodes
         self.all_nodes = list(all_nodes or [])
         self.threshold = threshold
+        self.max_context_documents = max_context_documents
         self.final_nodes = []
         self.final_document_paths = []
         self.context = ""
@@ -376,8 +378,8 @@ class RAGQueryPostprocessor:
             if node_with_score.score >= self.threshold
             and node_with_score.node.metadata["has_code"]
         ]
-        self.final_document_paths = self.unique_document_paths(self.final_nodes)
-        self.context = self.build_context(self.final_document_paths)
+        document_paths = self.unique_document_paths(self.final_nodes)
+        self.context = self.build_context(document_paths)
         self.final_prompt = self.build_final_prompt()
         return self.final_prompt
 
@@ -393,15 +395,21 @@ class RAGQueryPostprocessor:
 
     def build_context(self, document_paths: list[str]) -> str:
         context_blocks = []
+        self.final_document_paths = []
 
-        for index, document_path in enumerate(document_paths, start=1):
+        for document_path in document_paths:
             code_sections = self.code_nodes_for_document(document_path)
             if not code_sections:
                 continue
 
+            if len(self.final_document_paths) >= self.max_context_documents:
+                break
+
+            self.final_document_paths.append(document_path)
+            context_index = len(self.final_document_paths)
             first_section = code_sections[0]
             block_lines = [
-                f"[Context {index}]",
+                f"[Context {context_index}]",
                 f"Filepath: {document_path}",
                 f"Title: {first_section.metadata['document_title']}",
             ]

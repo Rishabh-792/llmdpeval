@@ -1,5 +1,6 @@
 import argparse
-import time
+import re
+from pathlib import Path
 
 from helper import (
     RETRIEVAL_TOP_K,
@@ -23,6 +24,26 @@ from weave_trace import (
     retrieved_node_trace_records,
     trace_code_generation,
 )
+
+
+QUERY_TYPE_PATTERN = re.compile(r"^Query type:\s*(.+)$", flags=re.MULTILINE)
+QUERY_DEFINITION_PATTERN = re.compile(
+    r"^Query definition:\s*(.+)$",
+    flags=re.MULTILINE,
+)
+
+
+def build_retrieval_query(prompt: str) -> str:
+    query_type = QUERY_TYPE_PATTERN.search(prompt)
+    query_definition = QUERY_DEFINITION_PATTERN.search(prompt)
+    if query_type is None or query_definition is None:
+        raise ValueError("Prompt is missing Query type or Query definition.")
+    return "\n".join(
+        [
+            f"Query type: {query_type.group(1)}",
+            f"Query definition: {query_definition.group(1)}",
+        ]
+    )
 
 
 def positive_int(value: str) -> int:
@@ -66,10 +87,15 @@ def parse_args() -> argparse.Namespace:
         help="Use retrieval-augmented generation. Set to False for a direct LLM call.",
     )
     parser.add_argument(
-        "--n",
+        "--run-index",
         type=positive_int,
         default=1,
-        help="Number of times to run generation for the same query.",
+        help="Run number to use in the generated filename.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory where generated code should be saved. If omitted, a new directory is created.",
     )
     parser.add_argument(
         "--weave",
@@ -102,17 +128,16 @@ def run_querying(args: argparse.Namespace) -> None:
     prompt = load_prompt(args.task, framework=args.framework)
     print_prompt(prompt)
 
-    output_dir = create_generation_output_dir(
+    output_dir = Path(args.output_dir) if args.output_dir else create_generation_output_dir(
         llm_model=llm_model_name,
         rag_enabled=use_rag,
-        task_name=args.task,
         framework=args.framework,
     )
+    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Saving generated code to: {output_dir}")
 
     if not use_rag:
-        run_generations(
-            run_count=args.n,
+        run_generation(
             embed_model_name=embed_model_name,
             llm_model_name=llm_model_name,
             use_rag=use_rag,
@@ -122,6 +147,7 @@ def run_querying(args: argparse.Namespace) -> None:
             retrieved_nodes=[],
             unique_retrieved_paths=[],
             final_prompt=prompt,
+            run_index=args.run_index,
         )
         return
 
@@ -129,10 +155,9 @@ def run_querying(args: argparse.Namespace) -> None:
     index = load_index_from_storage(storage_context)
     print(f"Loaded existing index from {persist_dir} for querying")
 
-    retrieval_query = prompt
-    print_prompt(retrieval_query, title="Retrieval query")
-
     retriever = index.as_retriever(similarity_top_k=RETRIEVAL_TOP_K)
+    retrieval_query = build_retrieval_query(prompt)
+    print_prompt(retrieval_query, title="Retrieval query")
     retrieved_nodes = retriever.retrieve(retrieval_query)
     print_retrieved_nodes(retrieved_nodes)
 
@@ -141,14 +166,14 @@ def run_querying(args: argparse.Namespace) -> None:
         candidate_nodes=retrieved_nodes,
         all_nodes=index.docstore.docs.values(),
         threshold=SIMILARITY_THRESHOLD,
+        max_context_documents=1,
     )
     final_prompt = postprocessor.postprocess()
 
     print(f"\nFinal context nodes: {len(postprocessor.final_nodes)}")
     print_prompt(final_prompt)
 
-    run_generations(
-        run_count=args.n,
+    run_generation(
         embed_model_name=embed_model_name,
         llm_model_name=llm_model_name,
         use_rag=use_rag,
@@ -158,12 +183,12 @@ def run_querying(args: argparse.Namespace) -> None:
         retrieved_nodes=retrieved_node_trace_records(retrieved_nodes),
         unique_retrieved_paths=postprocessor.final_document_paths,
         final_prompt=final_prompt,
+        run_index=args.run_index,
     )
 
 
-def run_generations(
+def run_generation(
     *,
-    run_count: int,
     embed_model_name: str | None,
     llm_model_name: str,
     use_rag: bool,
@@ -173,24 +198,21 @@ def run_generations(
     retrieved_nodes: list,
     unique_retrieved_paths: list[str],
     final_prompt: str,
+    run_index: int,
 ) -> None:
-    for run_index in range(1, run_count + 1):
-        print(f"\nGeneration run {run_index} of {run_count}")
-        generation = trace_code_generation(
-            embed_model=embed_model_name,
-            llm_model=llm_model_name,
-            rag_enabled=use_rag,
-            task_name=task_name,
-            output_dir=output_dir,
-            run_index=run_index,
-            retrieved_nodes=retrieved_nodes,
-            unique_retrieved_paths=unique_retrieved_paths,
-            final_prompt=final_prompt,
-        )
-        # print_generation_summary(generation)
-
-        if run_index < run_count:
-            time.sleep(3)
+    print(f"\nGeneration run {run_index}")
+    generation = trace_code_generation(
+        embed_model=embed_model_name,
+        llm_model=llm_model_name,
+        rag_enabled=use_rag,
+        task_name=task_name,
+        output_dir=output_dir,
+        run_index=run_index,
+        retrieved_nodes=retrieved_nodes,
+        unique_retrieved_paths=unique_retrieved_paths,
+        final_prompt=final_prompt,
+    )
+    # print_generation_summary(generation)
 
 
 def main() -> None:
