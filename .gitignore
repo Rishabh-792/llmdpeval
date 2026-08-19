@@ -8,3 +8,4 @@ openai_key.txt
 storage/
 venv/
 weave_key.txt
+evaluation_logs/
