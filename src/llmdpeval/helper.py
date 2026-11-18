@@ -175,19 +175,39 @@ def build_ollama_llm(model_name: str, temperature: float = 0.0):
     )
 
 
+class PatientGoogleGenAI(GoogleGenAI):
+    """GoogleGenAI that waits out a 503 (model overloaded) once. The library's own retries give up within 60 s."""
+
+    def complete(self, prompt: str, formatted: bool = False, **kwargs) -> CompletionResponse:
+        from google.genai.errors import ServerError
+        try:
+            return super().complete(prompt, formatted=formatted, **kwargs)
+        except ServerError as e:
+            if e.code != 503:
+                raise
+            print(f"503 from {self.model}; retrying once in {OVERLOAD_WAIT_S} s", flush=True)
+            time.sleep(OVERLOAD_WAIT_S)
+            return super().complete(prompt, formatted=formatted, **kwargs)
+
+
 def build_gemini_llm(model_name: str, temperature: float = 0.0):
     """Google Gemini client. Gemini 3.5+ models reason: high thinking level and the reasoning output budget."""
     if model_name in THINKING_GEMINI_MODELS:
         from google.genai import types
+        out = GEMINI_MAX_OUTPUT_TOKENS.get(model_name, SPHERE_MAX_OUTPUT_TOKENS)
         config = types.GenerateContentConfig(
-            temperature=temperature, max_output_tokens=SPHERE_MAX_OUTPUT_TOKENS,
+            temperature=temperature, max_output_tokens=out,
             thinking_config=types.ThinkingConfig(thinking_level="HIGH"))
-        return GoogleGenAI(model=model_name, temperature=temperature, max_tokens=SPHERE_MAX_OUTPUT_TOKENS,
-                           generation_config=config)
+        cls = PatientGoogleGenAI if model_name in PATIENT_GEMINI_MODELS else GoogleGenAI
+        return cls(model=model_name, temperature=temperature, max_tokens=out, generation_config=config)
     return GoogleGenAI(model=model_name, temperature=temperature, max_tokens=MAX_OUTPUT_TOKENS)
 
 
 THINKING_GEMINI_MODELS = {"gemini-3.5-flash-lite", "gemini-4-hydrogen"}
+# gemini-4-hydrogen reasons past 32768 tokens on the paper applications; 65536 is its output limit.
+GEMINI_MAX_OUTPUT_TOKENS = {"gemini-4-hydrogen": 65536}
+PATIENT_GEMINI_MODELS = {"gemini-4-hydrogen"}
+OVERLOAD_WAIT_S = 300
 AZURE_RESPONSES_URL = "https://llmdpeval.services.ai.azure.com/openai/v1/responses"
 
 

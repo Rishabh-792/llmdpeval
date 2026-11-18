@@ -302,3 +302,33 @@ def test_seeded_noise_flagged_only_on_dp_noise():
     assert not rule("import numpy as np\nrng = np.random.default_rng()\n")
     assert not rule("from sklearn.model_selection import train_test_split\nx = train_test_split([1, 2], random_state=0)\n")
     assert not rule("from diffprivlib.models import LogisticRegression\nm = LogisticRegression(random_state=None)\n")
+
+
+def test_hydrogen_waits_out_one_overload(monkeypatch):
+    from google.genai.errors import ServerError
+    from llama_index.llms.google_genai import GoogleGenAI
+    from llmdpeval import helper
+    calls = []
+
+    def fake_complete(self, prompt, formatted=False, **kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE"}})
+        return helper.CompletionResponse(text="ok")
+
+    monkeypatch.setattr(GoogleGenAI, "complete", fake_complete)
+    monkeypatch.setattr(helper, "OVERLOAD_WAIT_S", 0)
+    llm = helper.PatientGoogleGenAI.model_construct(model="gemini-4-hydrogen")
+    assert llm.complete("p").text == "ok" and len(calls) == 2
+    calls.clear()
+
+    def server_error(self, prompt, formatted=False, **kwargs):
+        calls.append(prompt)
+        raise ServerError(500, {"error": {"code": 500}})
+
+    monkeypatch.setattr(GoogleGenAI, "complete", server_error)
+    try:
+        llm.complete("p")
+        raise AssertionError("a 500 must not be retried")
+    except ServerError:
+        assert len(calls) == 1
