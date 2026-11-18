@@ -2,13 +2,17 @@
 code extraction from model answers."""
 import ast
 import hashlib
+import json
 import os
 import re
 import sys
+import time
 import tomllib
+import urllib.request
 from pathlib import Path
 
 from llama_index.core import Settings
+from llama_index.core.llms import CompletionResponse, CustomLLM, LLMMetadata
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.anthropic import Anthropic
@@ -47,6 +51,7 @@ DP_FRAMEWORK_REQUIREMENT_PATTERN = re.compile(
 )
 API_KEY_ENV_VARS = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "azure_openai": "AZURE_OPENAI_API_KEY",
     "gemini": "GOOGLE_API_KEY",
     "openai": "OPENAI_API_KEY",
     "sphere": "SPHERE_LLM_API_KEY",
@@ -73,6 +78,9 @@ LLM_MODELS = {
     "qwen3.6:27b": "sphere",
     "qwen3:32b": "sphere",
     "qwen3.6:35b": "sphere",
+    "gpt-5-mini": "azure_openai",
+    "gemini-3.5-flash-lite": "gemini",
+    "gemini-4-hydrogen": "gemini",
     "gpt-5.4": "openai",
     "gpt-5.4-nano": "openai",
     "gemini-3.1-flash-lite": "gemini",
@@ -119,6 +127,7 @@ def build_llm(model_name: str, temperature: float = 0.0):
     load_api_key(provider)
     builders = {
         "anthropic": build_anthropic_llm,
+        "azure_openai": build_azure_llm,
         "gemini": build_gemini_llm,
         "ollama": build_ollama_llm,
         "openai": build_openai_llm,
@@ -167,8 +176,54 @@ def build_ollama_llm(model_name: str, temperature: float = 0.0):
 
 
 def build_gemini_llm(model_name: str, temperature: float = 0.0):
-    """Google Gemini client."""
+    """Google Gemini client. Gemini 3.5+ models reason: high thinking level and the reasoning output budget."""
+    if model_name in THINKING_GEMINI_MODELS:
+        from google.genai import types
+        config = types.GenerateContentConfig(
+            temperature=temperature, max_output_tokens=SPHERE_MAX_OUTPUT_TOKENS,
+            thinking_config=types.ThinkingConfig(thinking_level="HIGH"))
+        return GoogleGenAI(model=model_name, temperature=temperature, max_tokens=SPHERE_MAX_OUTPUT_TOKENS,
+                           generation_config=config)
     return GoogleGenAI(model=model_name, temperature=temperature, max_tokens=MAX_OUTPUT_TOKENS)
+
+
+THINKING_GEMINI_MODELS = {"gemini-3.5-flash-lite", "gemini-4-hydrogen"}
+AZURE_RESPONSES_URL = "https://llmdpeval.services.ai.azure.com/openai/v1/responses"
+
+
+class AzureResponsesLLM(CustomLLM):
+    """Azure OpenAI (AI Foundry) Responses API, text in and text out. Reasoning models take no temperature;
+    the reasoning effort is set instead."""
+    model: str
+    effort: str = "high"
+    max_output_tokens: int = 32768
+    timeout_s: float = 1800.0
+
+    @property
+    def metadata(self) -> LLMMetadata:
+        return LLMMetadata(model_name=self.model, num_output=self.max_output_tokens, is_chat_model=False)
+
+    def complete(self, prompt: str, formatted: bool = False, **kwargs) -> CompletionResponse:
+        body = {"model": self.model, "input": prompt, "reasoning": {"effort": self.effort},
+                "max_output_tokens": self.max_output_tokens}
+        req = urllib.request.Request(AZURE_RESPONSES_URL, data=json.dumps(body).encode(), headers={
+            "Content-Type": "application/json", "api-key": os.environ["AZURE_OPENAI_API_KEY"]})
+        with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+            data = json.load(r)
+        text = "".join(c.get("text", "") for o in data.get("output", []) if o.get("type") == "message"
+                       for c in o.get("content", []) if c.get("type") == "output_text")
+        if not text and data.get("status") != "completed":  # e.g. the output budget ran out while reasoning
+            text = f"No answer: response status {data.get('status')} {data.get('incomplete_details')}"
+        return CompletionResponse(text=text, raw=data.get("usage"))
+
+    def stream_complete(self, prompt: str, formatted: bool = False, **kwargs):
+        raise NotImplementedError("streaming is not used by the pipeline")
+
+
+def build_azure_llm(model_name: str, temperature: float = 0.0):
+    """Azure OpenAI reasoning model (temperature does not apply)."""
+    return AzureResponsesLLM(model=model_name, max_output_tokens=SPHERE_MAX_OUTPUT_TOKENS,
+                             timeout_s=float(PIPELINE_CONFIG["sphere_timeout"]))
 
 
 def build_anthropic_llm(model_name: str, temperature: float = 0.0):
@@ -206,9 +261,28 @@ def build_sphere_llm(model_name: str, temperature: float = 0.0):
     )
 
 
+class RetryingOllamaEmbedding(OllamaEmbedding):
+    """Ollama embeddings that retry a query that times out or fails to connect. The shared GPU can queue an
+    embedding behind long generation calls; a retry returns the same vector, so results do not change."""
+
+    def get_query_embedding(self, query: str):
+        for attempt in range(EMBED_RETRIES):
+            try:
+                return super().get_query_embedding(query)
+            except Exception as e:  # httpx timeout / connection errors from the Ollama client
+                if attempt == EMBED_RETRIES - 1 or not any(s in type(e).__name__ for s in ("Timeout", "Connect")):
+                    raise
+                print(f"embedding retry {attempt + 1}/{EMBED_RETRIES - 1} after {type(e).__name__}", flush=True)
+                time.sleep(EMBED_RETRY_WAIT_S)
+
+
+EMBED_RETRIES = 4  # one try plus up to three retries
+EMBED_RETRY_WAIT_S = 30
+
+
 def build_sphere_embedding(model_name: str):
     """sphere-llm.net embedding client (its Ollama proxy; the OpenAI-style /api serves no embeddings)."""
-    return OllamaEmbedding(
+    return RetryingOllamaEmbedding(
         model_name=model_name,
         base_url=SPHERE_OLLAMA_BASE,
         client_kwargs={
@@ -284,10 +358,12 @@ def response_to_code(response) -> str:
     marked TRUNCATED. No fence: the whole text if it parses as Python or has code-like lines, else the text
     commented out under NO_CODE (an answer that is only prose)."""
     text = getattr(response, "text", None) or str(response)
+    if not text.strip():  # an empty answer has no code (ast.parse would accept the empty string)
+        return NO_CODE + "\n"
     blocks = re.findall(r"```([A-Za-z0-9_+-]*)[ \t]*\n?(.*?)```", text, flags=re.DOTALL)
     if blocks:
         code = next((body for tag, body in blocks if tag.lower() in PYTHON_TAGS), blocks[0][1])
-        return code.strip() + "\n"
+        return code.strip() + "\n" if code.strip() else NO_CODE + "\n"
     opening = re.search(r"```[A-Za-z0-9_+-]*[ \t]*\n", text)
     if opening:
         return f"{TRUNCATED}\n{text[opening.end():].strip()}\n"

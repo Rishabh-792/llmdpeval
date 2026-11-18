@@ -252,6 +252,20 @@ class _Checker:
                 self.flag("nonprivate_model", call, f"`{ast.unparse(a)[:60]}` passed to {what}, computed from a "
                                                     "non-private model")
 
+    # epsilon divided by 2 (or by 2*K): the replace-one factor for an add/remove-calibrated histogram
+    HALVED = re.compile(r"/\s*\(?\s*2\b|\b0\.5\s*\*|\*\s*0\.5\b")
+
+    def halved_epsilon(self, c) -> bool:
+        """The epsilon= of a call is halved, directly or through a variable assigned that way in the script."""
+        eps = next((k.value for k in c.keywords if k.arg == "epsilon"), None)
+        if eps is None:
+            return False
+        texts = [ast.unparse(eps)]
+        if isinstance(eps, ast.Name):
+            texts += [ast.unparse(n.value) for n in ast.walk(self.tree) if isinstance(n, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == eps.id for t in n.targets)]
+        return any(self.HALVED.search(s) for s in texts)
+
     def call_labels(self, c, env):
         q, a = self.q(c), _attr(c)
         recv = self.flat(c.func.value, env) if isinstance(c.func, ast.Attribute) else set()
@@ -272,7 +286,7 @@ class _Checker:
             if name in DPL_MEAN_LIKE and c.args and "subset" in self.flat(c.args[0], env):
                 self.flag("group_size_public", c, f"tools.{name} on the subgroup `{ast.unparse(c.args[0])[:40]}` "
                                                   "(its length is treated as public)")
-            if name.startswith("histogram") and self.replace_one:
+            if name.startswith("histogram") and self.replace_one and not self.halved_epsilon(c):
                 self.flag("add_remove_calibration", c, f"diffprivlib tools.{name} (sensitivity 1)")
             self.check_scale(c, env, f"tools.{name}")
             self.check_npd(c, env, f"tools.{name}")

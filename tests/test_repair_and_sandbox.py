@@ -273,3 +273,20 @@ def test_hash_helper_keeps_values():
         import hashlib
         assert run_grid.file_hash(p) == hashlib.sha256(b"x\ny\n").hexdigest()[:16]
         assert lf_hash([p], Path(d)) == hashlib.sha256(b"a.txtx\ny\n").hexdigest()[:16]
+
+
+def test_empty_answer_is_no_code():
+    from llmdpeval.helper import NO_CODE, code_status, response_to_code
+    for answer in ("", "\r\n", "```python\n```"):
+        assert code_status(response_to_code(answer)) == "no_code", repr(answer)
+
+
+def test_halved_histogram_epsilon_not_flagged():
+    from llmdpeval import privacy_check
+    base = "from diffprivlib import tools\nimport numpy as np\nx = np.zeros(10)\n"
+    halved = [base + "h, _ = tools.histogram(x, epsilon=1.0 / 2, bins=3, range=(0, 3))\n",
+              base + "e = 0.4 / (2 * 6)\nh, _ = tools.histogram(x, epsilon=e, bins=3, range=(0, 3))\n"]
+    full = base + "h, _ = tools.histogram(x, epsilon=1.0, bins=3, range=(0, 3))\n"
+    rule = lambda code: [f for f in privacy_check.check(code, replace_one=True) if f["rule"] == "add_remove_calibration"]
+    assert all(not rule(c) for c in halved)
+    assert rule(full)

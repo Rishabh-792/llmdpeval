@@ -30,7 +30,9 @@ packages differ from it. It also pins `weave`, which the code does not import.
 API keys are read from the environment variable, or else from a key file:
 
 - `sphere_key.txt` (`SPHERE_LLM_API_KEY`): sphere-llm.net models and embeddings
-- `openai_key.txt` (`OPENAI_API_KEY`), `anthropic_key.txt` (`ANTHROPIC_API_KEY`), `gemini_key.txt` (`GOOGLE_API_KEY`)
+- `azure_openai_key.txt` (`AZURE_OPENAI_API_KEY`): gpt-5-mini on Azure AI Foundry (Responses API)
+- `gemini_key.txt` (`GOOGLE_API_KEY`): gemini-3.5-flash-lite and gemini-4-hydrogen (high thinking level)
+- `openai_key.txt` (`OPENAI_API_KEY`), `anthropic_key.txt` (`ANTHROPIC_API_KEY`)
 
 Key files live in `~/.llmdpeval_keys/` (Windows: `%USERPROFILE%\.llmdpeval_keys\`) or in the folder
 `LLMDPEVAL_KEY_DIR` names. If neither exists, the repo root (gitignored) is read, with a warning. Keep them outside

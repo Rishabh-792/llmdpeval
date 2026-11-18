@@ -19,7 +19,7 @@ holdout = false                        # with code: hide the grid tasks' own ske
 # Generation
 models = ["gemma4:latest", "granite4.2:30b", "qwen3.6:27b", "qwen3:32b", "qwen3.6:35b"]
 conditions = ["None", "Diffprivlib", "OpenDP", "None-rag-k3", "Diffprivlib-rag-k3", "OpenDP-rag-k3"]
-runs = 6
+runs = 4
 sampled_temperature = 0.7              # run 1 of each cell uses temperature 0, runs 2..N use this
 think = "on"                             # "" = unset (OpenAI-style /api path), "on" or "off" (Ollama-native endpoint)
 repair = 0                             # inline repair rounds during generation. 0: generation (XDC) never runs
