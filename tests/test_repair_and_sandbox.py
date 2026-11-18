@@ -290,3 +290,15 @@ def test_halved_histogram_epsilon_not_flagged():
     rule = lambda code: [f for f in privacy_check.check(code, replace_one=True) if f["rule"] == "add_remove_calibration"]
     assert all(not rule(c) for c in halved)
     assert rule(full)
+
+
+def test_seeded_noise_flagged_only_on_dp_noise():
+    from llmdpeval import privacy_check
+    rule = lambda code: [f for f in privacy_check.check(code) if f["rule"] == "seeded_noise"]
+    assert rule("import numpy as np\nnp.random.seed(0)\n")
+    assert rule("import numpy as np\nrng = np.random.default_rng(42)\n")
+    assert rule("from diffprivlib.models import LogisticRegression\nm = LogisticRegression(random_state=1)\n")
+    assert rule("import diffprivlib as dp\nh = dp.tools.histogram([1], epsilon=1, random_state=7)\n")
+    assert not rule("import numpy as np\nrng = np.random.default_rng()\n")
+    assert not rule("from sklearn.model_selection import train_test_split\nx = train_test_split([1, 2], random_state=0)\n")
+    assert not rule("from diffprivlib.models import LogisticRegression\nm = LogisticRegression(random_state=None)\n")

@@ -50,6 +50,8 @@ MESSAGES = {
     "positive_delta": "The task requires delta = 0, but the code sets {detail}. Use a pure-DP mechanism (Laplace, "
                       "discrete Laplace, exponential) with delta = 0.",
     "dp_equals_true": "The output's DP value equals the true value for {detail}: that release has no noise.",
+    "seeded_noise": "{detail} fixes the random seed, so the noise is known to anyone who runs the code and the true "
+                    "value can be recovered. Do not seed the noise of a DP release (use an unseeded generator).",
     "over_budget": "The output's epsilon_total is {detail}, over the budget of epsilon = {budget:g}.",
 }
 
@@ -549,6 +551,37 @@ def final_json(stdout: str):
     return None
 
 
+def seed_flags(tree) -> list[dict]:
+    """Fixed seeds: a known seed makes the noise known, so the released value can be recovered exactly.
+    Flags np.random.seed / random.seed, default_rng or RandomState with a constant, and a constant
+    random_state= on a diffprivlib call."""
+    flags = []
+    dpl = set()  # local names bound to diffprivlib (modules, classes, functions)
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("diffprivlib"):
+            dpl |= {a.asname or a.name for a in n.names}
+        elif isinstance(n, ast.Import):
+            dpl |= {(a.asname or a.name).split(".")[0] for a in n.names if a.name.startswith("diffprivlib")}
+    for c in ast.walk(tree):
+        if not isinstance(c, ast.Call):
+            continue
+        name = ast.unparse(c.func)
+        const_arg = bool(c.args) and isinstance(c.args[0], ast.Constant) and c.args[0].value is not None
+        hit = None
+        if name.endswith("random.seed"):
+            hit = name
+        elif name.split(".")[-1] in ("default_rng", "RandomState", "Generator") and const_arg:
+            hit = f"{name}({ast.unparse(c.args[0])})"
+        elif name.split(".")[0] in dpl:  # random_state only matters on diffprivlib calls (it seeds their noise)
+            for k in c.keywords:
+                if k.arg == "random_state" and not (isinstance(k.value, ast.Constant) and k.value.value is None) \
+                        and not isinstance(k.value, ast.Call):
+                    hit = f"{name}(random_state={ast.unparse(k.value)})"
+        if hit:
+            flags.append({"rule": "seeded_noise", "line": c.lineno, "detail": hit})
+    return flags
+
+
 def check(code: str, stdout: str | None = None, budget: float | None = 1.0, delta_zero: bool = True,
           replace_one: bool = True) -> list[dict]:
     """All flags for a script, sorted by rule and line. stdout adds the final-JSON rules; budget, delta_zero and
@@ -557,7 +590,7 @@ def check(code: str, stdout: str | None = None, budget: float | None = 1.0, delt
         tree = ast.parse(code)
     except SyntaxError:
         return []
-    flags = _Checker(tree, replace_one, delta_zero).run()
+    flags = _Checker(tree, replace_one, delta_zero).run() + seed_flags(tree)
     if stdout is not None:
         flags += output_flags(stdout, budget)
     for f in flags:

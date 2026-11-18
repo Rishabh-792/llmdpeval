@@ -46,3 +46,19 @@ not assign grades.
 9. **Gaussian mechanism when the prompt asks for pure ε** (δ is never given): wrong privacy notion, **W**.
 10. **Usefulness on the median of 20 re-runs** (`python -m llmdpeval.grade median`): G vs U follows the median error over 20 re-runs of each valid script, not on one DP draw. A **P** stays **P** (its reported ε is still wrong); when its median is not useful, the reason says so ("not useful on the median"). Reported next to the single-run grades.
 11. **Paper applications**: utility is judged against the original analysis (for `gopher_sqf`: SPD -0.0750, accuracy 0.6834; see `applications/gopher_sqf/spec.md`), with the reference DP implementation's 20-run results as the bar, never against the generated script's own "true" values. A script that changes the model and so changes the non-private result (e.g. SPD -0.015) has not kept the paper's conclusion, even if its DP value tracks its own model: valid DP but not useful (**U**). The per-app thresholds are in each `applications/<app>/spec.md` and in `llmdpeval.app_grade`.
+12. **Seeded noise**: a constant seed on any generator that feeds a DP release (`np.random.seed`, `default_rng(42)`,
+    `random_state=1` on a diffprivlib call) makes the noise known to anyone who runs the code: **W**. A seed that is
+    never reached (e.g. inside an unused branch) does not count. Seeding a non-private step (a train/test split) is fine.
+13. **Fixed bars**: the utility bars are the reference's 20-run range (rule 11, per-app widening in each spec). A result
+    just outside the bar is **U**; bars are not moved after seeing results.
+14. **True loss vs reported ε**: privacy is judged by the loss the code actually incurs. Valid DP whose printed ε or
+    stated reasoning is wrong is **P** (or U if it is also not useful), not W.
+15. **Inference that cannot reach its level**: a simulated null with M draws cannot give p below 1/(M+1); with m tests
+    and Bonferroni at level α it needs M > m/α. A test that cannot reach its level does not keep the paper's
+    conclusion: **U** (not a privacy flaw).
+16. **Range-based sensitivity on an unbounded value**: a sensitivity that assumes a value lies in a range is valid only
+    if the code enforces the range (clipping before the noise). Noise calibrated to a range that is not enforced, e.g.
+    on an unclipped regression estimate: **W**.
+17. **Zhang FAERS bar**: significant AEs kept >= the reference minimum, AEs significant only in the DP release <= the
+    reference maximum, Top-100 overlap >= the reference minimum (`runs/ceiling.json`; implemented in
+    `llmdpeval.app_grade`), with a significance test that accounts for the DP noise.
