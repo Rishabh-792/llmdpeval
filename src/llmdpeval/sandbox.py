@@ -242,10 +242,13 @@ def run_python_file(code_file: Path, cwd: Path, timeout_s: int = RUN_TIMEOUT_SEC
         }
 
 
-def run_sandboxed(code_file: Path) -> dict:
+def run_sandboxed(code_file: Path, data: list[Path] | None = None, extra: tuple = (),
+                  settings: dict | None = None) -> dict:
     """Run a generated script from a copy in a fresh scratch dir with its task's data; returns the run_python_file
     result. Thread-safe (no chdir). An answer without code gets status "no_code", and code that is_unsafe flags
-    gets status "unsafe_not_run"; neither is run."""
+    gets status "unsafe_not_run"; neither is run. `data` replaces the task's data files (the audit passes
+    neighbouring copies), `extra` files are copied next to the script (modules it imports), and `settings`
+    replaces eval_settings(code_file)."""
     check_exec_allowed()
     code_file = Path(code_file)
     code = code_file.read_text(encoding="utf-8", errors="replace")
@@ -258,7 +261,7 @@ def run_sandboxed(code_file: Path) -> dict:
                 "stderr": "unsafe_not_run: matches sandbox.UNSAFE; review by hand", "status": "unsafe_not_run"}
     # ignore_cleanup_errors: on Windows a leftover child can hold a file; that must not lose the result.
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch:
-        for src in data_files(code_file):
+        for src in [*(data_files(code_file) if data is None else data), *extra]:
             shutil.copy(src, scratch)
         copy = Path(scratch) / code_file.name
         shutil.copy(code_file, copy)
@@ -267,7 +270,7 @@ def run_sandboxed(code_file: Path) -> dict:
                 for cmd in scratch_owner_commands(SANDBOX_USER, Path(scratch)):
                     if subprocess.run(cmd, capture_output=True).returncode != 0:
                         raise RuntimeError(f"could not hand {scratch} to {SANDBOX_USER}: {' '.join(cmd)} failed")
-            run = run_python_file(copy, cwd=Path(scratch), **eval_settings(code_file))
+            run = run_python_file(copy, cwd=Path(scratch), **(settings or eval_settings(code_file)))
         finally:
             if SANDBOX_USER:  # always take the dir back, so it can be removed even if the run failed to start
                 subprocess.run(["sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", scratch],

@@ -1,6 +1,7 @@
 """Grading helpers for a run_grid grid. The grades themselves are given by hand (docs/grading_rubric.md).
 
-  python -m llmdpeval.grade triage GRID            # first-pass flags per script -> GRID/triage.csv (decides nothing)
+  python -m llmdpeval.grade triage GRID            # first-pass flags per script -> GRID/triage.csv (decides nothing;
+                                                   # with GRID/audit.jsonl, an audit VIOLATION is shown as a suggested grade)
   python -m llmdpeval.grade table GRID [--runs 6]  # hand_grades.csv + results.jsonl -> GRID/grades.csv and a summary
   python -m llmdpeval.grade median GRID [GRID ...] [--n 20]   # usefulness (G vs U) on the median of N re-runs
 
@@ -18,6 +19,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from llmdpeval.audit import load_audit, suggestion as audit_suggestion
 from llmdpeval.helper import TASKS, code_files, file_key, safe_path_part
 from llmdpeval.run_grid import parse_cell
 from llmdpeval.sandbox import check_exec_allowed, is_unsafe, kill_sandbox_user, run_sandboxed
@@ -201,12 +203,17 @@ def output_flags(run: dict, task: str) -> dict:
 def triage(grid: Path) -> None:
     """Write GRID/triage.csv: static and output flags per script, to decide what to read first."""
     runs = load_results(grid)
+    audits = load_audit(grid)
     rows = []
     for code_file in code_files(grid):
         row = static_flags(code_file)
         key = (row["cell"], row["task"], row["run"])
         if key in runs:
             row |= output_flags(runs[key], row["task"])
+        if audits:  # GRID/audit.jsonl: a VIOLATION is a suggested grade with its evidence (rubric rule 18)
+            r = audits.get(key)
+            row["audit_verdict"] = r["verdict"] if r else ""
+            row["audit_suggested"], row["audit_evidence"] = audit_suggestion(r)
         rows.append(row)
     out = grid / "triage.csv"
     fields = list(dict.fromkeys(key for row in rows for key in row))
