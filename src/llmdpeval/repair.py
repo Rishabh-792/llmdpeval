@@ -248,7 +248,7 @@ def select_jobs(src: Path) -> tuple[set, set]:
 def repair_grid(src: Path, out: Path, rounds: int, workers: int = 1) -> None:
     """Copy the scripts of SRC to OUT and repair the crashed and privacy-flagged ones in OUT (see the module
     docstring). Resumable: scripts that already have a .repair.json are skipped. workers > 1 repairs several scripts
-    at once; it is allowed only for hosted models (SPHERE models share one GPU and are repaired one at a time)."""
+    of one model at once and finishes each model before the next, so a shared SPHERE GPU never serves two models."""
     from llmdpeval import rag
     from concurrent.futures import ThreadPoolExecutor
     from llmdpeval.helper import DEFAULT_EMBED_MODEL, LLM_MODELS, build_llm, keep_awake, load_prompt
@@ -256,8 +256,6 @@ def repair_grid(src: Path, out: Path, rounds: int, workers: int = 1) -> None:
     check_exec_allowed()  # repair runs the generated code: never on the XDC
     keep_awake()
     crashed, flagged = select_jobs(src)
-    if workers > 1 and any(LLM_MODELS.get(parse_cell(c)["model"]) == "sphere" for c, _ in crashed | flagged):
-        raise SystemExit("--workers > 1 is for hosted models only: SPHERE models share one GPU")
     for f in sorted(src.glob("*/*_code_*.py")):
         dst = out / f.parent.name / f.name
         if ".round" not in f.name and not dst.exists():
@@ -309,14 +307,18 @@ def repair_grid(src: Path, out: Path, rounds: int, workers: int = 1) -> None:
         for i, (cell, name) in enumerate(jobs, 1):
             repair_one(i, cell, name)
     else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(repair_one, i, cell, name) for i, (cell, name) in enumerate(jobs, 1)]
-            try:
-                for f in futures:
-                    f.result()
-            except BaseException:  # Ctrl-C or a failing job: drop the queued scripts instead of running them all
-                pool.shutdown(wait=True, cancel_futures=True)
-                raise
+        # One model at a time, its scripts in parallel: the shared SPHERE GPU never serves two models at once.
+        numbered = list(enumerate(jobs, 1))
+        for model in dict.fromkeys(parse_cell(cell)["model"] for _, (cell, _) in numbered):
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(repair_one, i, cell, name) for i, (cell, name) in numbered
+                           if parse_cell(cell)["model"] == model]
+                try:
+                    for f in futures:
+                        f.result()
+                except BaseException:  # Ctrl-C or a failing job: drop the queued scripts instead of running them all
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    raise
     kill_sandbox_user()
 
 
@@ -403,7 +405,7 @@ def main() -> None:
     p.add_argument("src", nargs="?", type=Path)
     p.add_argument("out", nargs="?", type=Path)
     p.add_argument("--rounds", type=int, default=2)
-    p.add_argument("--workers", type=int, default=1, help="scripts repaired at once (hosted models only)")
+    p.add_argument("--workers", type=int, default=1, help="scripts of one model repaired at once (models run one after another)")
     p.add_argument("--api-lookup", action="store_true", help="add exact pinned-API entries to crash feedback")
     p.add_argument("--selftest", action="store_true")
     a = p.parse_args()

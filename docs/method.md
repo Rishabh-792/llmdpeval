@@ -126,8 +126,8 @@ With `--api-lookup`, crash feedback also carries the exact entries of the pinned
 installed OpenDP and diffprivlib versions) closest to a framework name the traceback says does not exist or is
 called wrongly: a missing module, function, class or attribute, an unknown keyword or a missing argument
 (`api_lookup.py`). Bare names are looked up only in the frameworks the code imports. Static-privacy and
-printed-epsilon feedback are unchanged. `--workers N` repairs N scripts at once; it is refused for SPHERE models,
-which share one GPU.
+printed-epsilon feedback are unchanged. `--workers N` repairs N scripts of one model at once and finishes a model before the next starts,
+so the shared SPHERE GPU never serves two models at once.
 
 ## 8. Evaluation sandbox
 

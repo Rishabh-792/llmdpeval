@@ -344,17 +344,37 @@ def test_api_lookup_only_with_flag(monkeypatch):
     assert "diffprivlib.mechanisms.Laplace(" in repair.repair_prompt("P", "import diffprivlib\n", err)
 
 
-def test_parallel_repair_refused_for_sphere_models(monkeypatch, tmp_path):
-    cell = "qwen3.6-27b_ragk3_OpenDP_th_code_thinkon"
+def test_parallel_repair_runs_one_model_at_a_time(monkeypatch, tmp_path):
+    """With workers > 1, scripts of one model run in parallel, but the next model starts only after the last one."""
+    import threading
+    import time
+    cells = ["qwen3.6-27b_ragk3_OpenDP_th_code_thinkon", "granite4.2-30b_ragk3_OpenDP_th_code_thinkon"]
+    jobs = {(c, f"app-gopher-sqf_code_{r}.py") for c in cells for r in (1, 2, 3)}
+    for c, n in jobs:
+        (tmp_path / c).mkdir(exist_ok=True)
+        (tmp_path / c / n).write_text("x = 1\n", encoding="utf-8")
     monkeypatch.setattr(repair, "check_exec_allowed", lambda: None)
-    monkeypatch.setattr(repair, "select_jobs", lambda src: ({(cell, "app-gopher-sqf_code_1.py")}, set()))
+    monkeypatch.setattr(repair, "select_jobs", lambda src: (jobs, set()))
     monkeypatch.setattr("llmdpeval.helper.keep_awake", lambda: None)
     monkeypatch.setattr("llmdpeval.rag.load_index", lambda *a, **k: None)
-    try:
-        repair.repair_grid(tmp_path, tmp_path / "out", 2, workers=4)
-        raise AssertionError("workers > 1 must be refused for a SPHERE model")
-    except SystemExit as e:
-        assert "hosted models only" in str(e)
+    monkeypatch.setattr(repair, "cached_llm", lambda *a, **k: None)
+    monkeypatch.setattr(repair, "logged_prompt", lambda path: "p")
+    monkeypatch.setattr(repair, "kill_sandbox_user", lambda: None)
+    active, seen, lock = set(), [], threading.Lock()
+
+    def fake_loop(llm, code_file, prompt, rounds, task_prompt):
+        model = code_file.parent.name.split("_")[0]
+        with lock:
+            active.add(model)
+            seen.append(set(active))
+        time.sleep(0.05)
+        with lock:
+            active.discard(model)
+        return [{"status": "ok"}]
+
+    monkeypatch.setattr(repair, "repair_loop", fake_loop)
+    repair.repair_grid(tmp_path, tmp_path / "out", 2, workers=3)
+    assert all(len(s) == 1 for s in seen) and len(seen) == 6
 
 
 def test_repair_grid_with_workers_repairs_hosted_scripts(monkeypatch, tmp_path):
