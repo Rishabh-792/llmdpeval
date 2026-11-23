@@ -31,11 +31,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from llmdpeval import privacy_check
+from llmdpeval import api_lookup, privacy_check
 from llmdpeval.helper import code_status, file_key, load_prompt, response_to_code
 from llmdpeval.prompts import task_prompt_of
 from llmdpeval.sandbox import check_exec_allowed, is_unsafe, kill_sandbox_user, run_sandboxed
 
+API_LOOKUP = False  # --api-lookup: add the exact pinned API of a misnamed framework call to crash feedback
 STDERR_LINES = 40  # tail of stderr sent back; tracebacks end with the actual error
 STDOUT_TAIL = 20000  # characters of stdout kept per round in .repair.json (the final JSON line is at the end)
 # A "fix" that wraps the failure in a catch-all handler exits 0 without a DP answer.
@@ -145,8 +146,9 @@ def repair_prompt(final_prompt: str, code: str, stderr: str, privacy: str | None
                 "Fix the privacy accounting (the epsilon each release spends, and what you print) without changing "
                 "the parts that are correct. Return only executable Python code.")
     tail = "\n".join(stderr.strip().splitlines()[-STDERR_LINES:])
+    api = api_lookup.lookup(stderr, code) if API_LOOKUP else None
     return (f"{final_prompt}\n\nYour previous code:\n```python\n{code}```\n\n"
-            f"It failed with this error:\n```\n{tail}\n```\n"
+            f"It failed with this error:\n```\n{tail}\n```\n" + (f"{api}\n" if api else "") +
             "Fix the cause of the error. Do not hide it with a catch-all except, and do not change the privacy "
             "mechanisms, sensitivities or budget split unless the error is in them. Return only executable Python code.")
 
@@ -243,15 +245,19 @@ def select_jobs(src: Path) -> tuple[set, set]:
     return crashed, flagged
 
 
-def repair_grid(src: Path, out: Path, rounds: int) -> None:
+def repair_grid(src: Path, out: Path, rounds: int, workers: int = 1) -> None:
     """Copy the scripts of SRC to OUT and repair the crashed and privacy-flagged ones in OUT (see the module
-    docstring). Resumable: scripts that already have a .repair.json are skipped."""
+    docstring). Resumable: scripts that already have a .repair.json are skipped. workers > 1 repairs several scripts
+    at once; it is allowed only for hosted models (SPHERE models share one GPU and are repaired one at a time)."""
     from llmdpeval import rag
-    from llmdpeval.helper import DEFAULT_EMBED_MODEL, build_llm, keep_awake, load_prompt
+    from concurrent.futures import ThreadPoolExecutor
+    from llmdpeval.helper import DEFAULT_EMBED_MODEL, LLM_MODELS, build_llm, keep_awake, load_prompt
     from llmdpeval.run_grid import SAMPLED_TEMPERATURE, parse_cell
     check_exec_allowed()  # repair runs the generated code: never on the XDC
     keep_awake()
     crashed, flagged = select_jobs(src)
+    if workers > 1 and any(LLM_MODELS.get(parse_cell(c)["model"]) == "sphere" for c, _ in crashed | flagged):
+        raise SystemExit("--workers > 1 is for hosted models only: SPHERE models share one GPU")
     for f in sorted(src.glob("*/*_code_*.py")):
         dst = out / f.parent.name / f.name
         if ".round" not in f.name and not dst.exists():
@@ -262,14 +268,15 @@ def repair_grid(src: Path, out: Path, rounds: int) -> None:
     theory = rag.load_index(DEFAULT_EMBED_MODEL, "theory", build=False)
     (out / "repair_config.json").write_text(json.dumps(
         {"src": str(src), "rounds": rounds, "corpus": rag.corpus_hash(), "theory": rag.corpus_hash("theory"),
-         "crashed": len(crashed), "runnable_flagged": len(flagged)}), encoding="utf-8")
+         "crashed": len(crashed), "runnable_flagged": len(flagged), "api_lookup": API_LOOKUP}), encoding="utf-8")
     llms = {}
     # One model at a time so the shared GPU does not swap models between requests.
     jobs = sorted(crashed | flagged, key=lambda cf: (parse_cell(cf[0])["model"], cf))
-    for i, (cell, name) in enumerate(jobs, 1):
+
+    def repair_one(i: int, cell: str, name: str) -> None:
         code_file = out / cell / name
         if code_file.with_suffix(".repair.json").exists():
-            continue
+            return
         c = parse_cell(cell)
         _, task, run = file_key(code_file)
         task = task.replace("-", "_")
@@ -294,9 +301,23 @@ def repair_grid(src: Path, out: Path, rounds: int) -> None:
         else:
             # repair_loop records an API timeout etc. in the log and restores the last executed round
             status = repair_loop(llm, code_file, prompt, rounds, task_prompt)[-1]["status"]
-        # Repair runs one script at a time, so no sibling run can be hit: kill anything this one left behind.
-        kill_sandbox_user()
+        if workers == 1:  # one script at a time, so no sibling run can be hit: kill anything this one left behind
+            kill_sandbox_user()
         print(f"[{i}/{len(jobs)}] {status:14} {cell}/{name}", flush=True)
+
+    if workers == 1:
+        for i, (cell, name) in enumerate(jobs, 1):
+            repair_one(i, cell, name)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(repair_one, i, cell, name) for i, (cell, name) in enumerate(jobs, 1)]
+            try:
+                for f in futures:
+                    f.result()
+            except BaseException:  # Ctrl-C or a failing job: drop the queued scripts instead of running them all
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
+    kill_sandbox_user()
 
 
 def selftest() -> None:
@@ -382,12 +403,16 @@ def main() -> None:
     p.add_argument("src", nargs="?", type=Path)
     p.add_argument("out", nargs="?", type=Path)
     p.add_argument("--rounds", type=int, default=2)
+    p.add_argument("--workers", type=int, default=1, help="scripts repaired at once (hosted models only)")
+    p.add_argument("--api-lookup", action="store_true", help="add exact pinned-API entries to crash feedback")
     p.add_argument("--selftest", action="store_true")
     a = p.parse_args()
+    global API_LOOKUP
+    API_LOOKUP = a.api_lookup
     if a.selftest:
         selftest()
     elif a.src and a.out:
-        repair_grid(a.src, a.out, a.rounds)
+        repair_grid(a.src, a.out, a.rounds, a.workers)
     else:
         p.error("give SRC_GRID OUT_GRID, or --selftest")
 

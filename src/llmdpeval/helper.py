@@ -8,6 +8,7 @@ import re
 import sys
 import time
 import tomllib
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -176,16 +177,17 @@ def build_ollama_llm(model_name: str, temperature: float = 0.0):
 
 
 class PatientGoogleGenAI(GoogleGenAI):
-    """GoogleGenAI that waits out a 503 (model overloaded) once. The library's own retries give up within 60 s."""
+    """GoogleGenAI that waits out a 503 (model overloaded) or a 429 (rate limit) once. The library's own retries
+    give up within 60 s."""
 
     def complete(self, prompt: str, formatted: bool = False, **kwargs) -> CompletionResponse:
-        from google.genai.errors import ServerError
+        from google.genai.errors import APIError
         try:
             return super().complete(prompt, formatted=formatted, **kwargs)
-        except ServerError as e:
-            if e.code != 503:
+        except APIError as e:
+            if e.code not in (429, 503):
                 raise
-            print(f"503 from {self.model}; retrying once in {OVERLOAD_WAIT_S} s", flush=True)
+            print(f"{e.code} from {self.model}; retrying once in {OVERLOAD_WAIT_S} s", flush=True)
             time.sleep(OVERLOAD_WAIT_S)
             return super().complete(prompt, formatted=formatted, **kwargs)
 
@@ -208,7 +210,9 @@ THINKING_GEMINI_MODELS = {"gemini-3.5-flash-lite", "gemini-4-hydrogen"}
 GEMINI_MAX_OUTPUT_TOKENS = {"gemini-4-hydrogen": 65536}
 PATIENT_GEMINI_MODELS = {"gemini-4-hydrogen"}
 OVERLOAD_WAIT_S = 300
-AZURE_RESPONSES_URL = "https://llmdpeval.services.ai.azure.com/openai/v1/responses"
+# Azure AI Foundry resource, e.g. https://<resource>.services.ai.azure.com (the Responses API path is added).
+AZURE_ENDPOINT_ENV = "AZURE_OPENAI_ENDPOINT"
+AZURE_RETRY_WAITS_S = (30, 120, 300)
 
 
 class AzureResponsesLLM(CustomLLM):
@@ -226,10 +230,21 @@ class AzureResponsesLLM(CustomLLM):
     def complete(self, prompt: str, formatted: bool = False, **kwargs) -> CompletionResponse:
         body = {"model": self.model, "input": prompt, "reasoning": {"effort": self.effort},
                 "max_output_tokens": self.max_output_tokens}
-        req = urllib.request.Request(AZURE_RESPONSES_URL, data=json.dumps(body).encode(), headers={
+        if not os.environ.get(AZURE_ENDPOINT_ENV):
+            raise RuntimeError(f"set {AZURE_ENDPOINT_ENV} to the Azure AI Foundry resource URL")
+        url = os.environ[AZURE_ENDPOINT_ENV].rstrip("/") + "/openai/v1/responses"
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
             "Content-Type": "application/json", "api-key": os.environ["AZURE_OPENAI_API_KEY"]})
-        with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
-            data = json.load(r)
+        for attempt, wait in enumerate(AZURE_RETRY_WAITS_S + (None,)):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+                    data = json.load(r)
+                break
+            except urllib.error.HTTPError as e:  # rate limit or transient server error: wait and retry
+                if e.code not in (429, 500, 502, 503, 504) or wait is None:
+                    raise
+                print(f"{e.code} from {self.model}; retry {attempt + 1} in {wait} s", flush=True)
+                time.sleep(wait)
         text = "".join(c.get("text", "") for o in data.get("output", []) if o.get("type") == "message"
                        for c in o.get("content", []) if c.get("type") == "output_text")
         if not text and data.get("status") != "completed":  # e.g. the output budget ran out while reasoning

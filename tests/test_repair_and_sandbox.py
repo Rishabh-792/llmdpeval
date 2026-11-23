@@ -332,3 +332,71 @@ def test_hydrogen_waits_out_one_overload(monkeypatch):
         raise AssertionError("a 500 must not be retried")
     except ServerError:
         assert len(calls) == 1
+
+
+def test_api_lookup_only_with_flag(monkeypatch):
+    from llmdpeval import api_lookup
+    api_lookup.selftest()
+    err = "ImportError: cannot import name 'laplace' from 'diffprivlib.tools' (/x/__init__.py)"
+    monkeypatch.setattr(repair, "API_LOOKUP", False)
+    assert "diffprivlib.mechanisms.Laplace(" not in repair.repair_prompt("P", "import diffprivlib\n", err)
+    monkeypatch.setattr(repair, "API_LOOKUP", True)
+    assert "diffprivlib.mechanisms.Laplace(" in repair.repair_prompt("P", "import diffprivlib\n", err)
+
+
+def test_parallel_repair_refused_for_sphere_models(monkeypatch, tmp_path):
+    cell = "qwen3.6-27b_ragk3_OpenDP_th_code_thinkon"
+    monkeypatch.setattr(repair, "check_exec_allowed", lambda: None)
+    monkeypatch.setattr(repair, "select_jobs", lambda src: ({(cell, "app-gopher-sqf_code_1.py")}, set()))
+    monkeypatch.setattr("llmdpeval.helper.keep_awake", lambda: None)
+    monkeypatch.setattr("llmdpeval.rag.load_index", lambda *a, **k: None)
+    try:
+        repair.repair_grid(tmp_path, tmp_path / "out", 2, workers=4)
+        raise AssertionError("workers > 1 must be refused for a SPHERE model")
+    except SystemExit as e:
+        assert "hosted models only" in str(e)
+
+
+def test_repair_grid_with_workers_repairs_hosted_scripts(monkeypatch, tmp_path):
+    """End to end through repair_grid (threaded): each selected script gets a .repair.json and a progress line."""
+    cells = ["gpt-5-mini__OpenDP_thinkon", "gemini-3.5-flash-lite__OpenDP_thinkon"]
+    src = tmp_path / "src"
+    for cell in cells:
+        (src / cell).mkdir(parents=True)
+        (src / cell / "stat-count_code_1.py").write_text("raise ValueError('broken')\n", encoding="utf-8")
+
+    class FakeLLM:
+        def complete(self, prompt):
+            return type("R", (), {"text": "```python\nprint('fixed')\n```"})()
+
+    monkeypatch.setattr(repair, "check_exec_allowed", lambda: None)
+    monkeypatch.setattr(repair, "select_jobs", lambda s: ({(c, "stat-count_code_1.py") for c in cells}, set()))
+    monkeypatch.setattr("llmdpeval.helper.keep_awake", lambda: None)
+    monkeypatch.setattr("llmdpeval.helper.build_llm", lambda model, temp: FakeLLM())
+    monkeypatch.setattr("llmdpeval.rag.load_index", lambda *a, **k: None)
+    monkeypatch.setattr(repair, "kill_sandbox_user", lambda: None)
+    repair.repair_grid(src, tmp_path / "out", 1, workers=2)
+    for cell in cells:
+        log = json.loads((tmp_path / "out" / cell / "stat-count_code_1.repair.json").read_text(encoding="utf-8"))
+        assert log[0]["status"] == "error" and log[-1]["status"] == "ok", log
+
+
+def test_azure_retries_rate_limit(monkeypatch):
+    import io
+    import urllib.error
+    from llmdpeval import helper
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+        body = {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]}
+        return io.BytesIO(json.dumps(body).encode())
+
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.invalid")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    monkeypatch.setattr(helper.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(helper.time, "sleep", lambda s: None)
+    llm = helper.AzureResponsesLLM(model="gpt-5-mini")
+    assert llm.complete("p").text == "ok" and len(calls) == 2
