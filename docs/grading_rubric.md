@@ -20,7 +20,7 @@ not assign grades.
   - no private answer printed (e.g. a lazy frame object, or a crash caught inside try);
   - a fixed seed that makes the DP output deterministic;
   - "simulated" or mock DP;
-  - extra exact values printed next to the private answer (e.g. the exact scores of the private picks). Printing the true answer is required by the prompt and is fine.
+  - extra exact values printed next to the private answer (e.g. the exact scores of the private picks). Printing the true answer is required by the prompt and is fine (rule 20).
 - **E**: execution error. **N**: no code (timeout / no answer).
 
 ## ε is read from the framework, not from the comments
@@ -62,3 +62,43 @@ not assign grades.
 17. **Zhang FAERS bar**: significant AEs kept >= the reference minimum, AEs significant only in the DP release <= the
     reference maximum, Top-100 overlap >= the reference minimum (`runs/ceiling.json`; implemented in
     `llmdpeval.app_grade`), with a significance test that accounts for the DP noise.
+18. **Empirical audit** (`python -m llmdpeval.audit GRID`, `GRID/audit.jsonl`): a first-pass filter before hand
+    grading. A **VIOLATION** removes the script with numbers as evidence: a release that is deterministic and
+    changes between neighbouring datasets (no noise or seeded noise, rule 12; also DETERMINISTIC_VIOLATION from
+    `--deterministic-only`) is **W**; a measured lower bound on
+    the privacy loss above the budget (eps_lb > 1 at 95% confidence per script) is **W** (epsilon spent > 1).
+    **UNDERREPORTED** (eps_lb above the script's printed `epsilon_total` but within the budget) is **P**, or **U**
+    if the result is also not useful (rule 14). A **PASS** decides nothing: the script is graded by hand as usual.
+    `grade triage` and `app_grade` show the audit's suggestion; the grade is still confirmed by hand: check in the
+    code that the flagged release really is noise-free or seeded, because a valid release can also be constant
+    across 10 runs (e.g. a noisy ranking that prints only names when the gaps are large).
+
+Rulings of 2026-11-21, from the hand grading of the commercial grid:
+
+19. **diffprivlib with row norm q ≠ 1**: diffprivlib's objective-perturbation slack uses q where the proof needs q²
+    (IBM/differential-privacy-library #104), so with q ≠ 1 the library under-charges. This is the library's
+    accounting, not the generated code: a caveat noted in the reason ("q≠1 caveat"). The true ε is computed per
+    script from data_norm, C, ε and fit_intercept (the slack is 2·ln(1 + 0.25·q·C) in diffprivlib 0.6.6, without n,
+    so the gap is large: ε 0.6, data_norm √11, C 1 spends about 1.19). The grade judges the code against the
+    library's documented contract; a second column in the hand grades, `true_privacy`, gives the corrected total ε
+    (computed by hand from those four values; no tool writes it yet) and marks "over budget (library)" when it
+    exceeds 1. Both are reported (decided 2026-11-21). The q² correction rests on
+    the CMS 2011 Theorem 9 proof (IBM #104); confirm the issue's status before publication.
+    Excess that comes from the public input data rather than the code (e.g. Imai name-only probability rows that
+    sum to 1.008, true ε about 1.001-1.002) is a caveat in the reason, not a grade change.
+20. **Labelled non-private values**: the prompt requires the original and the script's own non-private results
+    next to the DP ones (`true_original_*`, `true_own_*`), and the reference prints the exact metrics of its DP model
+    the same way. Such labelled evaluation outputs (including a printed line of the original analysis's exact
+    result, e.g. Imai's self-reported race shares) are not releases and are not graded **W**. Only the `dp_*` values
+    are the release: an exact statistic used inside a DP release (an exact variance, group size or R² in a released
+    SE or test) is a leak, **W**.
+21. **Data-dependent choices where the spec gives a public domain** (category or level lists, one-hot columns,
+    bounds) are a leak, **W**: under replace-one one person can change them, and the output shape shows it (e.g. 79
+    vs 80 one-hot columns). Rule 7 (Top-K candidate list from the data) applies only to the toy Top-K task.
+22. **Significance conclusions on the median**: a result that must be "not significant" (or "significant") is
+    judged on the median-of-20 result (rule 10), whatever SE the script uses. A wrong conclusion at the median is
+    a wrong answer, **W**; one wrong draw is not.
+23. **Precedence and reporting**: an off-framework script that is also not useful is **U** (U before L). A **U**
+    whose test or statistic cannot work under the noise (e.g. Fisher's exact test on noisy counts) is marked
+    "STRUCTURAL" in the reason and reported apart from "valid but too noisy". A changed "original" analysis is noted,
+    not penalised, unless rule 11 applies.

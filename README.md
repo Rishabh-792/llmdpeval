@@ -30,7 +30,8 @@ packages differ from it. It also pins `weave`, which the code does not import.
 API keys are read from the environment variable, or else from a key file:
 
 - `sphere_key.txt` (`SPHERE_LLM_API_KEY`): sphere-llm.net models and embeddings
-- `azure_openai_key.txt` (`AZURE_OPENAI_API_KEY`): gpt-5-mini on Azure AI Foundry (Responses API)
+- `azure_openai_key.txt` (`AZURE_OPENAI_API_KEY`): gpt-5-mini on Azure AI Foundry (Responses API); also set
+  `AZURE_OPENAI_ENDPOINT` to the resource URL, e.g. `https://<resource>.services.ai.azure.com`
 - `gemini_key.txt` (`GOOGLE_API_KEY`): gemini-3.5-flash-lite and gemini-4-hydrogen (high thinking level)
 - `openai_key.txt` (`OPENAI_API_KEY`), `anthropic_key.txt` (`ANTHROPIC_API_KEY`)
 
@@ -91,7 +92,7 @@ no `xdc`).
 
 ```bash
 python -m llmdpeval.run_grid --grid-dir generated_code/grid_A --evaluate --eval-workers 4
-python -m llmdpeval.repair generated_code/grid_A generated_code/grid_A_fix2 --rounds 2
+python -m llmdpeval.repair generated_code/grid_A generated_code/grid_A_fix2 --rounds 2 --api-lookup
 python -m llmdpeval.run_grid --grid-dir generated_code/grid_A_fix2 --evaluate --eval-workers 4
 python -m llmdpeval.repair --selftest
 ```
@@ -104,14 +105,23 @@ feedback per round (docs/method.md, section 7). Evaluate the repaired grid after
 ## Grade
 
 ```bash
+python -m llmdpeval.audit generated_code/grid_A                  # first-pass DP audit (node only) -> audit.jsonl
+python -m llmdpeval.audit generated_code/grid_A --deterministic-only   # only the seeded/no-noise test, fast
 python -m llmdpeval.grade triage generated_code/grid_A           # flags to check first -> triage.csv
 python -m llmdpeval.grade table generated_code/grid_A --runs 4   # hand_grades.csv -> grades.csv + summary
 python -m llmdpeval.grade median generated_code/grid_A --n 20    # G vs U on the median of 20 re-runs (P stays P)
 python -m llmdpeval.app_grade generated_code/grid_A              # suggested grades for paper applications
+python -m llmdpeval.app_grade generated_code/grid_A --median 20 --hand generated_code/grid_A/hand_grades.csv
 ```
 
+The audit is a first-pass filter before hand grading: it runs each script on neighbouring datasets in the sandbox,
+and a VIOLATION removes the script with numbers as evidence (W, or P when only the printed epsilon is too low);
+`triage` and `app_grade` show it as a suggested grade. A PASS is not a proof of DP: the script goes on to hand
+grading. Method and validation: `docs/method.md` section 10.
+
 Hand grades (`hand_grades.csv`: cell, task, run, grade, reason) stay next to the grid outputs, not in the repo.
-`grade median` re-runs only the three toy tasks; paper applications keep their hand grade.
+`grade median` re-runs only the three toy tasks; for paper applications, `app_grade --median 20` re-runs the
+valid-DP scripts and applies the bars to the median release.
 
 ## Checks
 
