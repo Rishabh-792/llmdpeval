@@ -57,6 +57,9 @@ def generate_code(final_prompt: str, task: str, output_dir: Path, run_index: int
         thinking = message.get("thinking") if isinstance(message, dict) else getattr(message, "thinking", None)
         print(f"usage: thinking_chars={len(thinking or '')} eval_count={raw.get('eval_count')} "
               f"prompt_eval_count={raw.get('prompt_eval_count')} done_reason={raw.get('done_reason')}", flush=True)
+    elif response.additional_kwargs.get("completion_tokens") is not None:  # OpenAI-style clients (Bedrock)
+        kw = response.additional_kwargs
+        print(f"usage: prompt_tokens={kw.get('prompt_tokens')} completion_tokens={kw['completion_tokens']}", flush=True)
     code_file = output_dir / f"{safe_path_part(task)}_code_{run_index}.py"
     code = response_to_code(response)
     print(f"code status: {code_status(code)}", flush=True)  # ok | truncated | no_code (helper.response_to_code)

@@ -52,6 +52,7 @@ DP_FRAMEWORK_REQUIREMENT_PATTERN = re.compile(
 )
 API_KEY_ENV_VARS = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "aws": "AWS_BEARER_TOKEN_BEDROCK",
     "azure_openai": "AZURE_OPENAI_API_KEY",
     "gemini": "GOOGLE_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -82,6 +83,7 @@ LLM_MODELS = {
     "gpt-5-mini": "azure_openai",
     "gemini-3.5-flash-lite": "gemini",
     "gemini-4-hydrogen": "gemini",
+    "qwen.qwen3-coder-480b-a35b-instruct": "aws",
     "gpt-5.4": "openai",
     "gpt-5.4-nano": "openai",
     "gemini-3.1-flash-lite": "gemini",
@@ -128,6 +130,7 @@ def build_llm(model_name: str, temperature: float = 0.0):
     load_api_key(provider)
     builders = {
         "anthropic": build_anthropic_llm,
+        "aws": build_bedrock_llm,
         "azure_openai": build_azure_llm,
         "gemini": build_gemini_llm,
         "ollama": build_ollama_llm,
@@ -259,6 +262,18 @@ def build_azure_llm(model_name: str, temperature: float = 0.0):
     """Azure OpenAI reasoning model (temperature does not apply)."""
     return AzureResponsesLLM(model=model_name, max_output_tokens=SPHERE_MAX_OUTPUT_TOKENS,
                              timeout_s=float(PIPELINE_CONFIG["sphere_timeout"]))
+
+
+# AWS Bedrock's OpenAI-compatible endpoint (Bedrock API key as a bearer token).
+BEDROCK_API_BASE = "https://bedrock-mantle.us-east-1.api.aws/v1"
+
+
+def build_bedrock_llm(model_name: str, temperature: float = 0.0):
+    """AWS Bedrock open-weight model. Same output budget and timeout as the other paper-app models; the OpenAI
+    client retries rate limits and server errors (max_retries)."""
+    return OpenAILike(model=model_name, api_base=BEDROCK_API_BASE, api_key=os.environ["AWS_BEARER_TOKEN_BEDROCK"],
+                      is_chat_model=True, temperature=temperature, max_tokens=SPHERE_MAX_OUTPUT_TOKENS,
+                      timeout=float(PIPELINE_CONFIG["sphere_timeout"]), max_retries=3)
 
 
 def build_anthropic_llm(model_name: str, temperature: float = 0.0):

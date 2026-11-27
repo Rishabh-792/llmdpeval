@@ -420,3 +420,11 @@ def test_azure_retries_rate_limit(monkeypatch):
     monkeypatch.setattr(helper.time, "sleep", lambda s: None)
     llm = helper.AzureResponsesLLM(model="gpt-5-mini")
     assert llm.complete("p").text == "ok" and len(calls) == 2
+
+
+def test_bedrock_model_builds_openai_like(monkeypatch):
+    from llmdpeval import helper
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test")
+    llm = helper.build_llm("qwen.qwen3-coder-480b-a35b-instruct", 0.7)
+    assert llm.api_base == helper.BEDROCK_API_BASE and llm.max_tokens == helper.SPHERE_MAX_OUTPUT_TOKENS
+    assert llm.temperature == 0.7 and llm.max_retries == 3
